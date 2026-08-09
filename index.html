@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pocket Scan</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#c0392b">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #111; color: #fff;
+    font-family: -apple-system, Roboto, Arial, sans-serif;
+    overscroll-behavior: none;
+  }
+  #wrap { position: relative; height: 100%; display: flex; flex-direction: column; }
+
+  header {
+    padding: 14px 16px; display: flex; align-items: center; gap: 10px;
+    background: #C0392B; flex: 0 0 auto;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+
+  #camWrap { position: relative; flex: 1; background: #000; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  #frame {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  #frame .box {
+    width: 68vw; max-width: 320px; aspect-ratio: 1/1;
+    border: 3px solid rgba(255,255,255,.85); border-radius: 16px;
+    box-shadow: 0 0 0 2000px rgba(0,0,0,.35);
+  }
+
+  #status {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 16px; text-align: center; font-size: 14px;
+    background: linear-gradient(transparent, rgba(0,0,0,.65));
+    color: #eee;
+  }
+
+  #configScreen, #resultScreen {
+    position: absolute; inset: 0; background: #111;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px; text-align: center; gap: 14px;
+  }
+  #configScreen.show, #resultScreen.show { display: flex; }
+
+  input[type=text] {
+    width: 100%; max-width: 360px; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid #444; background: #1c1c1c; color: #fff; font-size: 14px;
+  }
+  button {
+    padding: 12px 22px; border-radius: 10px; border: none;
+    background: #C0392B; color: #fff; font-size: 15px; font-weight: 600;
+    cursor: pointer;
+  }
+  button.ghost { background: transparent; border: 1px solid #666; color: #ddd; }
+  .hint { font-size: 12px; color: #999; max-width: 320px; line-height: 1.5; }
+  .big { font-size: 20px; font-weight: 700; }
+</style>
+</head>
+<body>
+<div id="wrap">
+
+  <header>
+    <h1>Pocket Scan</h1>
+  </header>
+
+  <div id="camWrap">
+    <video id="video" playsinline autoplay muted></video>
+    <div id="frame"><div class="box"></div></div>
+    <div id="status">Se porneste camera&hellip;</div>
+  </div>
+
+  <!-- ecran de configurare (o singura data pe dispozitiv) -->
+  <div id="configScreen">
+    <div class="big">Configurare</div>
+    <p class="hint">
+      Lipiti aici adresa aplicatiei Pocket Management
+      (Deploy &rarr; Manage deployments &rarr; URL-ul care se termina in /exec).
+    </p>
+    <input type="text" id="appUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
+    <button id="saveUrlBtn">Salveaza</button>
+  </div>
+
+  <!-- ecran de rezultat, cat timp navigam catre aplicatie -->
+  <div id="resultScreen">
+    <div class="big" id="resultText">QR recunoscut</div>
+    <p class="hint" id="resultPayload"></p>
+    <button class="ghost" id="scanAgainBtn">Scaneaza din nou</button>
+  </div>
+
+</div>
+
+<script src="jsQR.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  var STORAGE_KEY = "pm_scan_app_url";
+
+  var video   = document.getElementById("video");
+  var status  = document.getElementById("status");
+  var configScreen = document.getElementById("configScreen");
+  var resultScreen = document.getElementById("resultScreen");
+
+  var canvas = document.createElement("canvas");
+  var ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  var stream = null;
+  var scanning = false;
+  var lastPayload = null;
+  var lastTime = 0;
+
+  function getAppUrl(){
+    try { return localStorage.getItem(STORAGE_KEY) || ""; } catch(e){ return ""; }
+  }
+
+  function setAppUrl(url){
+    try { localStorage.setItem(STORAGE_KEY, url); } catch(e){}
+  }
+
+  function showConfig(){
+    configScreen.classList.add("show");
+    document.getElementById("appUrlInput").value = getAppUrl();
+  }
+
+  function hideConfig(){
+    configScreen.classList.remove("show");
+  }
+
+  document.getElementById("saveUrlBtn").addEventListener("click", function(){
+    var v = document.getElementById("appUrlInput").value.trim();
+    if(v.indexOf("http") !== 0){
+      alert("Introduceti un URL valid (incepe cu https://).");
+      return;
+    }
+    setAppUrl(v);
+    hideConfig();
+    startCamera();
+  });
+
+  document.getElementById("scanAgainBtn").addEventListener("click", function(){
+    resultScreen.classList.remove("show");
+    lastPayload = null;
+    startCamera();
+  });
+
+  // detector nativ (Android/Chrome), cu fallback pe jsQR (necesar pt. iOS Safari)
+  var nativeDetector = null;
+  if("BarcodeDetector" in window){
+    try { nativeDetector = new BarcodeDetector({ formats: ["qr_code"] }); }
+    catch(e){ nativeDetector = null; }
+  }
+
+  function startCamera(){
+    if(!getAppUrl()){ showConfig(); return; }
+    hideConfig();
+    status.textContent = "Se porneste camera\u2026";
+
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    }).then(function(s){
+      stream = s;
+      video.srcObject = s;
+      return video.play();
+    }).then(function(){
+      status.textContent = "Indreptati camera spre eticheta QR";
+      scanning = true;
+      requestAnimationFrame(tick);
+    }).catch(function(err){
+      status.textContent = "Nu s-a putut porni camera: " + (err && err.message ? err.message : err);
+    });
+  }
+
+  function stopCamera(){
+    scanning = false;
+    if(stream){
+      stream.getTracks().forEach(function(t){ t.stop(); });
+      stream = null;
+    }
+  }
+
+  function tick(){
+    if(!scanning){ return; }
+
+    if(video.readyState === video.HAVE_ENOUGH_DATA){
+
+      if(nativeDetector){
+        nativeDetector.detect(video).then(function(codes){
+          if(codes && codes.length){ handleCode(codes[0].rawValue); }
+        }).catch(function(){ /* continuam */ });
+      } else {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        var img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        var code = window.jsQR ? jsQR(img.data, img.width, img.height) : null;
+        if(code && code.data){ handleCode(code.data); }
+      }
+    }
+
+    if(scanning){ requestAnimationFrame(tick); }
+  }
+
+  function handleCode(text){
+    if(!text){ return; }
+
+    var now = Date.now();
+    // evitam reactii duble pe acelasi cadru/cod repetat rapid
+    if(text === lastPayload && (now - lastTime) < 3000){ return; }
+    lastPayload = text;
+    lastTime = now;
+
+    stopCamera();
+
+    document.getElementById("resultPayload").textContent = text;
+    resultScreen.classList.add("show");
+    status.textContent = "";
+
+    var appUrl = getAppUrl();
+    var target = appUrl + (appUrl.indexOf("?") === -1 ? "?" : "&") +
+                 "payload=" + encodeURIComponent(text);
+
+    // scurta pauza, ca omul sa vada ce s-a citit, apoi navigam
+    setTimeout(function(){
+      window.location.href = target;
+    }, 700);
+  }
+
+  // buton lung pe titlu = reconfigurare URL (util daca se schimba adresa aplicatiei)
+  document.querySelector("header h1").addEventListener("dblclick", function(){
+    stopCamera();
+    showConfig();
+  });
+
+  startCamera();
+
+})();
+</script>
+
+<script>
+if("serviceWorker" in navigator){
+  window.addEventListener("load", function(){
+    navigator.serviceWorker.register("sw.js").catch(function(){});
+  });
+}
+</script>
+
+</body>
+</html>
