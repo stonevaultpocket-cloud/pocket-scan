@@ -165,7 +165,7 @@
     status.textContent = "Se porneste camera\u2026";
 
     navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false
     }).then(function(s){
       stream = s;
